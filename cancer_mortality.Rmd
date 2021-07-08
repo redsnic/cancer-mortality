@@ -1,0 +1,625 @@
+---
+title: "Cancer Mortality"
+author: "Nicolò Rossi"
+date: "8/7/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F, dev="CairoPNG", fig.align='center')
+library(tidyverse)
+library(skimr)
+library(gridExtra)
+library(ggcorrplot)
+library(ggbeeswarm)
+library(ggpubr)
+library(ggsignif)
+library(VIM)
+library(mice)
+library(ggbiplot)
+library(ggraph)
+library(M3C)
+library(factoextra)
+library(leaps)
+library(caret)
+library(glmnet)
+set.seed(42)
+```
+
+## Exploratory Data Analysis
+
+```{r}
+cancer.dataset <- read.csv("cancer_reg.csv") %>% mutate(Geography = as.factor(Geography), binnedInc = as.factor(binnedInc))
+cancer.dataset %>% skim()
+```
+
+### Features
+
+These descriptions were directly taken from the dataset's website:
+
+* **TARGET_deathRate**: Dependent variable. Mean per capita (100,000) cancer mortalities(a)
+* **avgAnnCount**: Mean number of reported cases of cancer diagnosed annually(a)
+* **avgDeathsPerYear**: Mean number of reported mortalities due to cancer(a)
+* **incidenceRate**: Mean per capita (100,000) cancer diagoses(a)
+* **medianIncome**: Median income per county (b)
+* **popEst2015**: Population of county (b)
+* **povertyPercent**: Percent of populace in poverty (b)
+* **studyPerCap**: Per capita number of cancer-related clinical trials per county (a)
+* **binnedInc**: Median income per capita binned by decile (b)
+* **MedianAge**: Median age of county residents (b)
+* **MedianAgeMale**: Median age of male county residents (b)
+* **MedianAgeFemale**: Median age of female county residents (b)
+* **Geography**: County name (b)
+* **AvgHouseholdSize**: Mean household size of county (b)
+* **PercentMarried**: Percent of county residents who are married (b)
+* **PctNoHS18_24**: Percent of county residents ages 18-24 highest education attained: less than high school (b)
+* **PctHS18_24**: Percent of county residents ages 18-24 highest education attained: high school diploma (b)
+* **PctSomeCol18_24**: Percent of county residents ages 18-24 highest education attained: some college (b)
+* **PctBachDeg18_24**: Percent of county residents ages 18-24 highest education attained: bachelor's degree (b)
+* **PctHS25_Over**: Percent of county residents ages 25 and over highest education attained: high school diploma (b)
+* **PctBachDeg25_Over**: Percent of county residents ages 25 and over highest education attained: bachelor's degree (b)
+* **PctEmployed16_Over**: Percent of county residents ages 16 and over employed (b)
+* **PctUnemployed16_Over**: Percent of county residents ages 16 and over unemployed (b)
+* **PctPrivateCoverage**: Percent of county residents with private health coverage (b)
+* **PctPrivateCoverageAlone**: Percent of county residents with private health coverage alone (no public assistance) (b)
+* **PctEmpPrivCoverage**: Percent of county residents with employee-provided private health coverage (b)
+* **PctPublicCoverage**: Percent of county residents with government-provided health coverage (b)
+* **PctPubliceCoverageAlone**: Percent of county residents with government-provided health coverage alone (b)
+* **PctWhite**: Percent of county residents who identify as White (b)
+* **PctBlack**: Percent of county residents who identify as Black (b)
+* **PctAsian**: Percent of county residents who identify as Asian (b)
+* **PctOtherRace**: Percent of county residents who identify in a category which is not White, Black, or Asian (b)
+* **PctMarriedHouseholds**: Percent of married households (b)
+
+BirthRate: Number of live births relative to number of women in county (b)
+
+#### Additional notes on features
+
+For **Geography**, each observation is relative to a county in the U.S., they are just like identifiers. 
+The variables are divided mainly in two categories **economy** and **anagraphic**. The first category includes
+variables about employment, education, household size, health insurances and so on. The latter has data about
+the age of the people, the number of cancer diagnoses, their ethnicity (we will check for dependencies with income and ethnicity), marriages and similar. 
+
+We can prepare some scatterplots to see if there are dependencies between these variables:
+
+* Economic features
+
+```{r}
+pairs(cancer.dataset %>% select(
+  medIncome,
+  povertyPercent,
+  AvgHouseholdSize,
+  PctPrivateCoverage,
+  PctPrivateCoverageAlone,
+  PctEmpPrivCoverage,
+  PctPublicCoverage,
+  PctPublicCoverageAlone
+))
+```
+* Anagraphic features:
+
+```{r}
+pairs(cancer.dataset %>% select(
+  PctHS18_24,
+  PctSomeCol18_24,
+  binnedInc,
+  PctBachDeg18_24,
+  PctHS25_Over,
+  PctBachDeg25_Over,
+  PctEmployed16_Over,
+  PctUnemployed16_Over
+))
+```
+
+* Ethnicity and income
+
+```{r}
+pairs(cancer.dataset %>% select(
+  PctWhite,
+  PctBlack,
+  PctAsian,
+  PctOtherRace,
+  medIncome
+))
+```
+> In this plot it is shown a correlation between `medIncome` and the percentage of population with a certain ethnicity. 
+
+* A selection of features that seem, at a first sight and in my opinion, correlated to cancer death:
+
+```{r}
+pairs(cancer.dataset %>% select(avgAnnCount, avgDeathsPerYear, incidenceRate, medIncome, popEst2015, povertyPercent))
+```
+
+## Missing values
+
+Three columns have NA values in quite different proportions:
+
+```{r}
+aggr(cancer.dataset)
+```
+We can impute a value for them using packages as `mice`:
+
+```{r, echo=FALSE}
+# the features used for this imputation are just an example
+# the imputation method is based on stochastic linear regression
+imp <- mice(select(cancer.dataset, PctSomeCol18_24, PctEmployed16_Over,
+                   PctPrivateCoverageAlone, medIncome,
+                   TARGET_deathRate, avgAnnCount), method = "norm.nob")
+df_filled <- complete(imp)
+pairs(df_filled)
+```
+
+```{r}
+df <- cancer.dataset %>% mutate(
+  PctSomeCol18_24 = df_filled$PctSomeCol18_24,
+  PctEmployed16_Over = df_filled$PctEmployed16_Over,
+  PctPrivateCoverageAlone = df_filled$PctPrivateCoverageAlone
+)
+cormat <- round(cor(df %>% select(-Geography, -binnedInc)), 2)
+#no NA removal is needed as we imputed the missing data
+#cormat <- cormat %>% apply(1:2, function(x){ifelse(is.na(x),0,x)})
+ggcorrplot(cormat, hc.order = TRUE, outline.col = "white", tl.cex = 5.75)
+```
+
+As linear regression was a part of this course, we will find the best way to model NA values by using this technique manually. 
+
+## Linear regression models for NA imputation
+
+The variables we have to impute are: `PctSomeCol18_24`, `PctEmployed16_Over` and `PctPrivateCoverageAlone`
+
+#### PctSomeCol18_24
+
+Firstly, we remove the two factor variables and the other two columns with NAs as we will not use them for the imputation.
+We then keep only complete observations. We also remove the response variable
+to avoid creating artificial relationships between the imputed variables and the response.
+
+```{r}
+df <- cancer.dataset %>% select(
+  - Geography,
+  - binnedInc,
+  - PctEmployed16_Over,
+  - PctPrivateCoverageAlone,
+  - TARGET_deathRate
+) %>% filter(
+  !is.na(PctSomeCol18_24)
+)
+nrow(df)
+```
+
+```{r}
+mod.full <- lm(PctSomeCol18_24 ~ ., data = df)
+summary(mod.full)
+```
+We see that other features with values very related to this variable are considered as significant. 
+However, it could be useful to apply strategies for feature selection to reduce the complexity of the model.
+
+We apply forward an backward feature selection:
+
+```{r}
+mod.fwd <- regsubsets(PctSomeCol18_24 ~ ., data = df, method = "forward")
+mod.fwd.summary <- summary(mod.fwd)
+print("BIC")
+print(mod.fwd.summary$bic)
+print("R²-adj")
+mod.fwd.summary$adjr2
+plot(mod.fwd.summary$adjr2, main = "Forward [RED: best R², BLUE: best BIC]")
+adjr2.max <- which.max(mod.fwd.summary$adjr2)
+points(adjr2.max, mod.fwd.summary$adjr2[adjr2.max], 
+        col = "red", cex = 2, pch = 20)
+bic.min <- which.min(mod.fwd.summary$bic)
+points(bic.min, mod.fwd.summary$adjr2[bic.min], 
+        col = "blue", cex = 2, pch = 20)
+```
+
+```{r}
+mod.bkw <- regsubsets(PctSomeCol18_24 ~ ., data = df, method = "backward")
+mod.bkw.summary <- summary(mod.bkw)
+print("BIC")
+print(mod.bkw.summary$bic)
+print("R²-adj")
+mod.bkw.summary$adjr2
+plot(mod.bkw.summary$adjr2,  main = "Backward [RED: best R², BLUE: best BIC]")
+adjr2.max <- which.max(mod.bkw.summary$adjr2)
+points(adjr2.max, mod.bkw.summary$adjr2[adjr2.max], 
+        col = "red", cex = 2, pch = 20)
+bic.min <- which.min(mod.bkw.summary$bic)
+points(bic.min, mod.bkw.summary$adjr2[bic.min], 
+        col = "blue", cex = 2, pch = 20)
+
+# use coef(mod.bkw, n) to extract the coefficients 
+```
+
+The fourth model is the best in regards of BIC metric in both approaches, with the same exact score. 
+
+```{r}
+# helper function to predict run predicitons from coefficients
+predict.from.coefficients <- function(df, coefs){
+  as.matrix(df[, names(coefs)[-1]]) %*% coefs[-1] + coefs[1]
+}
+```
+
+We can then plot the squared error on the training data:
+
+```{r}
+coefs <- coef(mod.bkw, 4)
+print(coefs)
+preds <- predict.from.coefficients(df, coefs)
+ggplot(data.frame(squared_error = (preds-df$PctSomeCol18_24)^2)) +
+  geom_density(aes(x = squared_error)) +
+  labs(title="Squared error distribution for PctSomeCol18_24 prediction")
+# sd for stochastic imputation
+std.dev.bkw.imp <- sd(df$PctSomeCol18_24)
+```
+
+We can now use this model to impute the NAs: 
+
+```{r}
+imputation <- predict.from.coefficients(cancer.dataset, coef(mod.bkw, 4)) + rnorm(1:nrow(cancer.dataset), mean = 0, sd = std.dev.bkw.imp)
+cancer.dataset.filled <- cancer.dataset %>% mutate(PctSomeCol18_24 = ifelse(is.na(PctSomeCol18_24), imputation, PctSomeCol18_24))
+ggplot(cancer.dataset.filled) +
+  geom_point(aes(x=PctSomeCol18_24, y=TARGET_deathRate)) +
+  geom_point(data=cancer.dataset, aes(x=PctSomeCol18_24, y=TARGET_deathRate), color="red", alpha = 0.5) +
+  labs(title = "College education (18-24) vs Death rate, red dots are the values in data")
+```
+
+We can now move on to the other two variables.
+
+#### PctEmployed16_Over
+
+```{r}
+df <- cancer.dataset %>% select(
+  - Geography,
+  - binnedInc,
+  - PctSomeCol18_24,
+  - PctPrivateCoverageAlone,
+  - TARGET_deathRate
+) %>% filter(
+  !is.na(PctEmployed16_Over)
+)
+nrow(df)
+
+mod.full <- lm(PctEmployed16_Over ~ ., data = df)
+summary(mod.full)
+```
+Here we see how so many more variables have a significance this time:
+
+```{r}
+mod.fwd <- regsubsets(PctEmployed16_Over ~ ., data = df, method = "forward", nvmax=20)
+mod.fwd.summary <- summary(mod.fwd)
+print("BIC")
+print(mod.fwd.summary$bic)
+print("R²-adj")
+mod.fwd.summary$adjr2
+plot(mod.fwd.summary$adjr2, main = "Forward [RED: best R², BLUE: best BIC]")
+adjr2.max <- which.max(mod.fwd.summary$adjr2)
+points(adjr2.max, mod.fwd.summary$adjr2[adjr2.max],
+        col = "red", cex = 2, pch = 20)
+bic.min <- which.min(mod.fwd.summary$bic)
+points(bic.min, mod.fwd.summary$adjr2[bic.min], 
+        col = "blue", cex = 2, pch = 20)
+```
+
+```{r}
+mod.bkw <- regsubsets(PctEmployed16_Over ~ ., data = df, method = "backward", nvmax=20)
+mod.bkw.summary <- summary(mod.bkw)
+print("BIC")
+print(mod.bkw.summary$bic)
+print("R²-adj")
+mod.bkw.summary$adjr2
+plot(mod.bkw.summary$adjr2, main = "Backward [RED: best R², BLUE: best BIC]")
+adjr2.max <- which.max(mod.bkw.summary$adjr2)
+points(adjr2.max, mod.bkw.summary$adjr2[adjr2.max], 
+        col = "red", cex = 2, pch = 20)
+bic.min <- which.min(mod.bkw.summary$bic)
+points(bic.min, mod.bkw.summary$adjr2[bic.min], 
+        col = "blue", cex = 2, pch = 20)
+```
+
+For this feature, we test our models also with cross validation using `caret` package:
+
+```{r}
+ten.folds <- trainControl(method = "cv", number = 10)
+# leave.one.out <- trainControl(method = "LOOCV")
+ten.folds.models <- list()
+ten.folds.models[[21]] <- train(PctEmployed16_Over ~ ., data = df, method = "lm", trControl = ten.folds)
+# leave.one.out.model <- train(PctEmployed16_Over ~ ., data = df, method = "lm", trControl = leave.one.out)
+
+outcomes <- cancer.dataset %>% filter(!is.na(PctEmployed16_Over)) %>% pull(PctEmployed16_Over)
+for(i in 1:20){
+  if(i > 1)
+    ten.folds.models[[i]] <- train(y = outcomes, x = as.matrix(df[, names(coef(mod.bkw, i))[-1]]), method = "lm", trControl = ten.folds)
+  else 
+    ten.folds.models[[i]] <- train(y = outcomes, x = df[, names(coef(mod.bkw, 1))[-1], drop=FALSE], method = "lm", trControl = ten.folds)
+}
+rsqrs <- 1:21
+for(i in 1:21){
+  rsqrs[i] <- ten.folds.models[[i]]$results$Rsquared
+}
+plot(1:21, rsqrs, main = "Distribution of R² w.r.t the number of used variables")
+points(which.max(rsqrs), max(rsqrs), col = "red", cex = 2, pch = 20)
+rmses <- 1:21
+for(i in 1:21){
+  rmses[i] <- ten.folds.models[[i]]$results$RMSE
+}
+plot(1:21, rmses, main = "Distribution of RMSE w.r.t the number of used variables")
+points(which.min(rmses), min(rmses), col = "red", cex = 2, pch = 20)
+bics <- 1:21
+for(i in 1:21){
+  bics[i] <- BIC(ten.folds.models[[i]]$finalModel)
+}
+plot(1:21, bics, main = "Distribution of BIC w.r.t the number of used variables")
+points(which.min(bics), min(bics), col = "red", cex = 2, pch = 20)
+```
+Note that the last point to the right in the previous plots was computed by using all the variables.
+Using BIC, the best model is achieved with 18 variables also after CV, this is reflected in the R-squared.
+
+```{r}
+coefs <- ten.folds.models[[18]]$finalModel$coefficients
+print(coefs)
+preds <- predict.from.coefficients(df, coefs)
+ggplot(data.frame(squared_error = (preds-df$PctEmployed16_Over)^2)) +
+  geom_density(aes(x = squared_error))
+# sd for stochastic imputation
+std.dev.bkw.imp <- sd(df$PctEmployed16_Over)
+```
+
+we can now impute the NAs: 
+
+```{r}
+imputation <- predict.from.coefficients(cancer.dataset, coefs) + rnorm(1:nrow(cancer.dataset), mean = 0, sd = std.dev.bkw.imp)
+cancer.dataset.filled <- cancer.dataset.filled %>% mutate(PctEmployed16_Over = ifelse(is.na(PctEmployed16_Over), imputation, PctEmployed16_Over))
+ggplot(cancer.dataset.filled) +
+  geom_point(aes(x=PctEmployed16_Over, y=TARGET_deathRate)) +
+  geom_point(data=cancer.dataset, aes(x=PctEmployed16_Over, y=TARGET_deathRate), color="red", alpha=0.5) +
+  labs(title = "Employment (>16) vs Death rate, red dots are the original values")
+```
+
+#### PctPrivateCoverageAlone
+
+Finally we repeat the first procedure on this last variable:
+
+```{r}
+df <- cancer.dataset %>% select(
+  - Geography,
+  - binnedInc,
+  - PctEmployed16_Over,
+  - PctSomeCol18_24,
+  - TARGET_deathRate
+) %>% filter(
+  !is.na(PctPrivateCoverageAlone)
+)
+nrow(df)
+```
+
+```{r}
+mod.full <- lm(PctPrivateCoverageAlone ~ ., data = df)
+summary(mod.full)
+```
+
+```{r}
+mod.fwd <- regsubsets(PctPrivateCoverageAlone ~ ., data = df, method = "forward", nvmax = 20)
+mod.fwd.summary <- summary(mod.fwd)
+print("BIC")
+print(mod.fwd.summary$bic)
+print("R²-adj")
+mod.fwd.summary$adjr2
+plot(mod.fwd.summary$adjr2, main = "Forward [RED: best R², BLUE: best BIC]")
+adjr2.max <- which.max(mod.fwd.summary$adjr2)
+points(adjr2.max, mod.fwd.summary$adjr2[adjr2.max], 
+        col = "red", cex = 2, pch = 20)
+bic.min <- which.min(mod.fwd.summary$bic)
+points(bic.min, mod.fwd.summary$adjr2[bic.min], 
+        col = "blue", cex = 2, pch = 20)
+```
+
+```{r}
+mod.bkw <- regsubsets(PctPrivateCoverageAlone ~ ., data = df, method = "backward", nvmax = 20)
+mod.bkw.summary <- summary(mod.bkw)
+print("BIC")
+print(mod.bkw.summary$bic)
+print("R²-adj")
+mod.bkw.summary$adjr2
+plot(mod.bkw.summary$adjr2, main = "Backward [RED: best R², BLUE: best BIC]")
+adjr2.max <- which.max(mod.bkw.summary$adjr2)
+points(adjr2.max, mod.bkw.summary$adjr2[adjr2.max], 
+        col = "red", cex = 2, pch = 20)
+bic.min <- which.min(mod.bkw.summary$bic)
+points(bic.min, mod.bkw.summary$adjr2[bic.min], 
+        col = "blue", cex = 2, pch = 20)
+
+# use coef(mod.bkw, n) to extract the coefficients 
+```
+
+The best model by BIC has 10 variables (we use the backword strategy selection even if the forward one gave equivalent results)
+
+```{r}
+predict.from.coefficients <- function(df, coefs){
+  as.matrix(df[, names(coefs)[-1]]) %*% coefs[-1] + coefs[1]
+}
+coefs <- coef(mod.bkw, 10)
+print(coefs)
+preds <- predict.from.coefficients(df, coefs)
+ggplot(data.frame(squared_error = (preds-df$PctPrivateCoverageAlone)^2)) +
+  geom_density(aes(x = squared_error))
+# sd for stochastic imputation
+std.dev.bkw.imp <- sd(df$PctPrivateCoverageAlone)
+imputation <- predict.from.coefficients(cancer.dataset, coefs) + rnorm(1:nrow(cancer.dataset), mean = 0, sd = std.dev.bkw.imp)
+cancer.dataset.filled <- cancer.dataset.filled %>% mutate(PctPrivateCoverageAlone = ifelse(is.na(PctPrivateCoverageAlone), imputation, PctPrivateCoverageAlone))
+ggplot(cancer.dataset.filled) +
+  geom_point(aes(x=PctPrivateCoverageAlone, y=TARGET_deathRate)) +
+  geom_point(data=cancer.dataset, aes(x=PctPrivateCoverageAlone, y=TARGET_deathRate), color="red", alpha = 0.5) 
+```
+
+
+### Checking imputation results
+
+Now we have prepared a dataset without missng values
+
+```{r}
+aggr(cancer.dataset.filled)
+cormat <- round(cor(cancer.dataset.filled %>% select(-Geography, -binnedInc)), 2)
+ggcorrplot(cormat, hc.order = TRUE, outline.col = "white", tl.cex = 5.5)
+```
+The correlation matrix looks very similar to the one created doing imputation with `mice` package.
+
+### Creating a linear regression model for the TARGET variable
+
+We now want to create a linear regression model for the cancer death rate. In doing so we are also interested in which are the most relevant
+features in this context and, to this end, we will use the **lasso** methodology.
+
+```{r}
+cancer.dataset.filled <- cancer.dataset.filled %>% select(-Geography, -binnedInc)
+```
+We firstly plot the summary of the a full linear model and some helpful scatterplots:
+
+```{r}
+mod.full <- lm(TARGET_deathRate ~ ., data = cancer.dataset.filled)
+summary(mod.full)
+```
+```{r}
+df <- cancer.dataset.filled %>% pivot_longer(!starts_with("TARGET"), values_to = "vals",  names_to = "vars")
+for(c in colnames(cancer.dataset.filled)){
+  if(c != "TARGET_deathRate"){
+    p <- ggplot(df %>% filter(vars == !!c)) +
+      geom_point(aes(x=vals, y=TARGET_deathRate), alpha = 0.5) +
+      labs(x = c, title = paste(c,"vs death rate"))
+    print(p)
+  }
+}
+```
+
+We notice that the variable MedianAge has some outliers with impossibly high values. It is likely that those points need to be divided by 10, similarly,
+some values of AvgHouseholdSize need to be multiplied by 100.
+
+```{r}
+cancer.dataset.filled <- cancer.dataset.filled %>% mutate(MedianAge = ifelse(MedianAge>100, MedianAge/10, MedianAge))
+cancer.dataset.filled <- cancer.dataset.filled %>% mutate(AvgHouseholdSize = ifelse(AvgHouseholdSize<1, AvgHouseholdSize*100, AvgHouseholdSize))
+df <- cancer.dataset.filled %>% pivot_longer(!starts_with("TARGET"), values_to = "vals",  names_to = "vars")
+ggplot(df %>% filter(vars == "MedianAge")) +
+      geom_point(aes(x=vals, y=TARGET_deathRate), alpha = 0.5) +
+      labs(x = "MedianAge", title = paste("MedianAge","vs death rate"))
+ggplot(df %>% filter(vars == "AvgHouseholdSize")) +
+      geom_point(aes(x=vals, y=TARGET_deathRate), alpha = 0.5) +
+      labs(x = "AvgHouseholdSize", title = paste("AvgHouseholdSize","vs death rate"))
+```
+We compute the lasso model:
+
+```{r}
+y <- cancer.dataset.filled$TARGET_deathRate
+X <- cancer.dataset.filled %>% select(-TARGET_deathRate)
+cv.out <- cv.glmnet(y = y, x = as.matrix(X), alpha = 1)
+plot(cv.out)
+bestlamda <- cv.out$lambda.min
+bestlamda
+lasso.model <- glmnet(y=y, x=X, alpha = 1, lambda = bestlamda)
+```
+
+and these are the computed coefficients:
+
+```{r}
+coef(lasso.model)
+```
+
+As the lasso method does not filter many variables, we decide do a pre-filtering with backward feature selection:  
+
+```{r}
+mod.bkw <- regsubsets(TARGET_deathRate ~ ., data = cancer.dataset.filled, method = "backward", nvmax = 20)
+mod.bkw.summary <- summary(mod.bkw)
+print("BIC")
+print(mod.bkw.summary$bic)
+print("R²-adj")
+mod.bkw.summary$adjr2
+plot(mod.bkw.summary$adjr2, main = "Backward [RED: best R², BLUE: best BIC]")
+adjr2.max <- which.max(mod.bkw.summary$adjr2)
+points(adjr2.max, mod.bkw.summary$adjr2[adjr2.max], 
+        col = "red", cex = 2, pch = 20)
+bic.min <- which.min(mod.bkw.summary$bic)
+points(bic.min, mod.bkw.summary$adjr2[bic.min], 
+        col = "blue", cex = 2, pch = 20)
+```
+to then apply the lasso technique again:
+
+```{r}
+coef(mod.bkw, 15)
+y <- cancer.dataset.filled$TARGET_deathRate
+X <- cancer.dataset.filled %>% select(-TARGET_deathRate)
+X <- X[, names(coef(mod.bkw, 15)[-1])]
+cv.out <- cv.glmnet(y = y, x = as.matrix(X), alpha = 1)
+plot(cv.out)
+bestlamda <- cv.out$lambda.min
+bestlamda
+lasso.model <- glmnet(y=y, x=X, alpha = 1, lambda = bestlamda)
+coef(lasso.model)
+```
+Obtaining the following values for MSE, RMSE and MAE. In this case we used the whole (training) dataset:
+
+```{r}
+y_est <- predict(lasso.model, as.matrix(X))
+print("MSE:")
+print(sum((y-y_est)^2/nrow(X)))
+print("RMSE:")
+print(sqrt(sum((y-y_est)^2/nrow(X))))
+print("MAE:")
+print(sum(abs(y-y_est)/nrow(X)))
+```
+Finally, can have a better understanding of the model's performance using cross validation:
+
+```{r}
+k <- 10
+y <- cancer.dataset.filled$TARGET_deathRate
+X <- cancer.dataset.filled %>% select(-TARGET_deathRate)
+fold_group <- runif(nrow(X), min = 1, max = k+1) %>% trunc()
+X <- X %>% mutate(fold_group = fold_group)
+error <- 0
+error_abs <- 0
+for(fold in 1:k){
+  # --- TRAIN DATASET
+  # - use backward method
+  df_train <- cancer.dataset.filled %>% filter(fold_group != fold)
+  y <- df_train$TARGET_deathRate
+  X <- df_train %>% select(-TARGET_deathRate)
+  mod.bkw <- regsubsets(TARGET_deathRate ~ ., data = cancer.dataset.filled, method = "backward", nvmax = 20)
+  mod.bkw.summary <- summary(mod.bkw)
+  bic.min <- which.min(mod.bkw.summary$bic)
+  # - use lasso
+  # filter unused variables
+  X <- X[, names(coef(mod.bkw, bic.min)[-1])]
+  # compute lambda
+  cv.out <- cv.glmnet(y = y, x = as.matrix(X), alpha = 1)
+  bestlamda <- cv.out$lambda.min
+  lasso.model <- glmnet(y=y, x=X, alpha = 1, lambda = bestlamda)
+  # --- TEST DATASET
+  df_test <- cancer.dataset.filled %>% filter(fold_group == fold)
+  y <- df_test$TARGET_deathRate
+  X <- df_test %>% select(-TARGET_deathRate)
+  X <- X[, (coef(lasso.model)[,1] %>% names())[-1]] # used variables
+  y_est <- predict(lasso.model, as.matrix(X))
+  # --- COMPUTE METRICS
+  error <- error + sum((y-y_est)^2)
+  print(paste("MSE of fold ", fold, " :"))
+  print(sum((y-y_est)^2)/nrow(X))
+  error_abs <- error_abs + sum(sum(abs(y-y_est)))
+  print(paste("MAE of fold ", fold, " :"))
+  print(sum(abs(y-y_est))/nrow(X))
+}
+print("========================================")
+print("FINAL MSE")
+print(error/nrow(cancer.dataset.filled))
+print("FINAL RMSE")
+print(sqrt(error/nrow(cancer.dataset.filled)))
+print("FINAL MAE")
+print(error_abs/nrow(cancer.dataset.filled))
+```
+Sowing how the previous values were (a little) optimistic, as expected. Such error is not that large when considering the distribution of the response variable:
+
+```{r}
+ggplot(cancer.dataset.filled) +
+  geom_histogram(aes(x=TARGET_deathRate), fill="white", color="black") +
+  labs(title = "Death rate distribution")
+```
+
+We have shown how it is possible to use linear regression combined with lasso and backward feature selection to create a linear regression model to 
+predict the death rates of cancer given economic and anagraphic data.
+
+
+
