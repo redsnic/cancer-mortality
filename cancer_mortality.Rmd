@@ -9,22 +9,16 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE, message = F, warning = F, dev="CairoPNG", fig.align='center')
 library(tidyverse)
 library(skimr)
-library(gridExtra)
 library(ggcorrplot)
-library(ggbeeswarm)
-library(ggpubr)
-library(ggsignif)
 library(VIM)
 library(mice)
-library(ggbiplot)
-library(ggraph)
-library(M3C)
-library(factoextra)
 library(leaps)
 library(caret)
 library(glmnet)
 set.seed(42)
 ```
+
+In this work, I will consider a dataset about cancer survival in the U.S. counties:  
 
 ## Exploratory Data Analysis
 
